@@ -10,6 +10,26 @@ import (
 	"github.com/cli/go-gh/v2/pkg/api"
 )
 
+// makeSuggestion builds a Suggestion from a group of added lines.
+func makeSuggestion(commitID, path string, plusLines []string, startPlusLine int) Suggestion {
+	body := fmt.Sprintf("```suggestion\n%s\n```", strings.Join(plusLines, "\n"))
+	groupLen := len(plusLines)
+	sug := Suggestion{
+		Body:     body,
+		CommitID: commitID,
+		Path:     path,
+		Side:     "RIGHT",
+	}
+	if groupLen > 1 {
+		sug.StartSide = "RIGHT"
+		sug.StartLine = startPlusLine
+		sug.Line = startPlusLine + groupLen - 1
+	} else {
+		sug.Line = startPlusLine
+	}
+	return sug
+}
+
 type Suggestion struct {
 	Body      string `json:"body"`
 	CommitID  string `json:"commit_id"`
@@ -21,15 +41,43 @@ type Suggestion struct {
 }
 
 func CreateSuggestions(commitID, diff string) ([]Suggestion, error) {
-
 	var suggestions []Suggestion
 	var currentPlusLines []string
 	var startPlusLine int
-	scanner := bufio.NewScanner(strings.NewReader(diff))
-
 	var currentFile string
 	var lastDiffLine int
 	var inDiffHunk bool
+
+	// flush appends any pending suggestion or insertion and resets state
+	flush := func(contextLine string, includeContext bool, contextLineNumber int) {
+		if len(currentPlusLines) == 0 {
+			return
+		}
+		// insertion: single added line should be inserted before context line
+		if includeContext && len(currentPlusLines) == 1 {
+			// build suggestion to replace the context line with insertion + context
+			var lines []string
+			if contextLineNumber == 0 {
+				lines = []string{currentPlusLines[0], contextLine}
+			} else {
+				lines = []string{currentPlusLines[0]}
+			}
+			body := fmt.Sprintf("```suggestion\n%s\n```", strings.Join(lines, "\n"))
+			suggestions = append(suggestions, Suggestion{
+				Body:     body,
+				CommitID: commitID,
+				Path:     currentFile,
+				Side:     "RIGHT",
+				Line:     contextLineNumber,
+			})
+		} else {
+			// multi-line or replacement suggestion
+			suggestions = append(suggestions, makeSuggestion(commitID, currentFile, currentPlusLines, startPlusLine))
+		}
+		currentPlusLines = nil
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(diff))
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -38,30 +86,7 @@ func CreateSuggestions(commitID, diff string) ([]Suggestion, error) {
 		if strings.HasPrefix(line, "diff --git") {
 			inDiffHunk = false
 			// flush any pending plus lines
-			if len(currentPlusLines) > 0 {
-				body := fmt.Sprintf("```suggestion\n%s\n```", strings.Join(currentPlusLines, "\n"))
-				groupLen := len(currentPlusLines)
-				if groupLen > 1 {
-					suggestions = append(suggestions, Suggestion{
-						Body:      body,
-						CommitID:  commitID,
-						Path:      currentFile,
-						Side:      "RIGHT",
-						StartSide: "RIGHT",
-						StartLine: startPlusLine,
-						Line:      startPlusLine + groupLen - 1,
-					})
-				} else {
-					suggestions = append(suggestions, Suggestion{
-						Body:     body,
-						CommitID: commitID,
-						Path:     currentFile,
-						Side:     "RIGHT",
-						Line:     startPlusLine,
-					})
-				}
-				currentPlusLines = nil
-			}
+			flush("", false, 0)
 			continue
 		}
 
@@ -75,30 +100,7 @@ func CreateSuggestions(commitID, diff string) ([]Suggestion, error) {
 		if strings.HasPrefix(line, "@@") {
 			inDiffHunk = true
 			// flush any pending plus lines at hunk boundary
-			if len(currentPlusLines) > 0 {
-				body := fmt.Sprintf("```suggestion\n%s\n```", strings.Join(currentPlusLines, "\n"))
-				groupLen := len(currentPlusLines)
-				if groupLen > 1 {
-					suggestions = append(suggestions, Suggestion{
-						Body:      body,
-						CommitID:  commitID,
-						Path:      currentFile,
-						Side:      "RIGHT",
-						StartSide: "RIGHT",
-						StartLine: startPlusLine,
-						Line:      startPlusLine + groupLen - 1,
-					})
-				} else {
-					suggestions = append(suggestions, Suggestion{
-						Body:     body,
-						CommitID: commitID,
-						Path:     currentFile,
-						Side:     "RIGHT",
-						Line:     startPlusLine,
-					})
-				}
-				currentPlusLines = nil
-			}
+			flush("", false, 0)
 
 			// Extract starting line numbers from the hunk header
 			parts := strings.Split(line, " ")
@@ -120,30 +122,7 @@ func CreateSuggestions(commitID, diff string) ([]Suggestion, error) {
 				currentPlusLines = append(currentPlusLines, strings.TrimPrefix(line, "+"))
 			} else {
 				// on non-plus line, flush group if exists
-				if len(currentPlusLines) > 0 {
-					body := fmt.Sprintf("```suggestion\n%s\n```", strings.Join(currentPlusLines, "\n"))
-					groupLen := len(currentPlusLines)
-					if groupLen > 1 {
-						suggestions = append(suggestions, Suggestion{
-							Body:      body,
-							CommitID:  commitID,
-							Path:      currentFile,
-							Side:      "RIGHT",
-							StartSide: "RIGHT",
-							StartLine: startPlusLine,
-							Line:      startPlusLine + groupLen - 1,
-						})
-					} else {
-						suggestions = append(suggestions, Suggestion{
-							Body:     body,
-							CommitID: commitID,
-							Path:     currentFile,
-							Side:     "RIGHT",
-							Line:     startPlusLine,
-						})
-					}
-					currentPlusLines = nil
-				}
+				flush(line, true, lastDiffLine-1)
 			}
 
 			// Update line count: skip deletions
@@ -154,30 +133,7 @@ func CreateSuggestions(commitID, diff string) ([]Suggestion, error) {
 	}
 
 	// flush any remaining grouped suggestions
-	if len(currentPlusLines) > 0 {
-		body := fmt.Sprintf("```suggestion\n%s\n```", strings.Join(currentPlusLines, "\n"))
-		groupLen := len(currentPlusLines)
-		if groupLen > 1 {
-			suggestions = append(suggestions, Suggestion{
-				Body:      body,
-				CommitID:  commitID,
-				Path:      currentFile,
-				Side:      "RIGHT",
-				StartSide: "RIGHT",
-				StartLine: startPlusLine,
-				Line:      startPlusLine + groupLen - 1,
-			})
-		} else {
-			suggestions = append(suggestions, Suggestion{
-				Body:     body,
-				CommitID: commitID,
-				Path:     currentFile,
-				Side:     "RIGHT",
-				Line:     startPlusLine,
-			})
-		}
-		currentPlusLines = nil
-	}
+	flush("", false, 0)
 
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("error reading diff: %w", err)
