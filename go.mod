@@ -1,4 +1,4 @@
-module github.com/mheap/gh-extension-create-review-comments
+module github.com/mheap/gh-create-review-comments
 
 go 1.24.2
 
